@@ -1,0 +1,9 @@
+# Build output
+/dist/
+
+# The agent's own files, when it is run from the repository
+config.json
+state.json
+state.json.bad
+agent.log
+agent.log.1

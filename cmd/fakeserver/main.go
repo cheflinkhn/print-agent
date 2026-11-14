@@ -223,9 +223,8 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// sampleChit builds a kitchen chit in ESC/POS, close to what Cheflink will
-// send: large type, modifiers, a note, accented Spanish and a cut. Cheflink's
-// real layout is built on the server; this one only exercises the printer.
+// sampleChit builds a sample kitchen chit in ESC/POS: large type, modifiers,
+// a note, accented Spanish and a cut. It only exercises the printer.
 func sampleChit(codePage, table, seq int) []byte {
 	const (
 		normal     = 0x00

@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # No C code anywhere, so every target is one self-contained file.
 export CGO_ENABLED := 0
 
-.PHONY: all test vet build windows linux-arm64 fakeserver clean
+.PHONY: all test vet build windows linux-arm64 fakeserver release clean
 
 all: vet test build windows
 
@@ -29,6 +29,19 @@ linux-arm64:
 # The stand-in for Cheflink, for development.
 fakeserver:
 	go build -trimpath -o dist/fakeserver ./cmd/fakeserver
+
+# What a GitHub release carries; .github/workflows/release.yml runs this for
+# a version tag. The names hold no version, so a link to
+# releases/latest/download/NAME always gives the newest.
+RELEASE := dist/release
+release: windows linux-arm64
+	rm -rf $(RELEASE)
+	mkdir -p $(RELEASE)
+	cp dist/cheflink-print-agent.exe $(RELEASE)/cheflink-print-agent.exe
+	cp dist/agent-linux-arm64 $(RELEASE)/cheflink-print-agent-linux-arm64
+	zip -j -q $(RELEASE)/cheflink-print-agent-windows.zip \
+		dist/cheflink-print-agent.exe installer/install.cmd installer/uninstall.cmd installer/install.ps1
+	cd $(RELEASE) && sha256sum cheflink-print-agent-windows.zip cheflink-print-agent.exe cheflink-print-agent-linux-arm64 > SHA256SUMS
 
 clean:
 	rm -rf dist

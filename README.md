@@ -5,15 +5,15 @@ chits by themselves. It asks Cheflink for new chits every couple of seconds
 and writes each one to the kitchen's network printer. Nobody taps "print".
 
 It is for kitchens that work from paper. The browser cannot do this: a web
-page cannot print without a person confirming the dialog, and Cheflink's
-server cannot reach a printer inside the venue's network.
+page cannot print without a person confirming the dialog, and nothing
+outside the venue's network can reach a printer inside it.
 
 ```
 Cheflink  <--- "anything to print?" ---  agent on the cashier PC  --- bytes --->  kitchen printer
  (cloud)   ---  one chit, as bytes  --->   (this program)          (TCP 9100)      (venue's Wi-Fi)
 ```
 
-The agent is deliberately dumb. Cheflink builds the whole chit as printer
+The agent is deliberately dumb. Each chit arrives as finished printer
 commands; the agent fetches the bytes, sends them and reports back. A change
 to the chit's layout never needs a visit to a cashier PC.
 
@@ -42,13 +42,12 @@ The installer has not been run on a real cashier PC yet; see the table below.
 
 | | |
 | --- | --- |
-| Fetch, print, report, retry | Works, against the stand-in server and a pretend printer, on Linux and on Windows 11 |
+| Fetch, print, report, retry | Works, against `cmd/fakeserver` and a pretend printer, on Linux and on Windows 11 |
 | Automated tests | Pass (`make test`) |
 | A real printer | **Not tried yet.** `test-print` sends the same bytes as the PowerShell test that worked on the Sewoo SLK-TS400 |
 | Windows service (`install`, `start`, `stop`) | **Written, never run.** It compiles; it needs an administrator prompt to try |
 | The installer (`install.cmd`) | **Written, never run.** There was no Windows machine to try it on |
 | The release workflow | **Written, never run.** `make release` builds the same files on a developer's machine; no version has been tagged, so the download link above gives "not found" until one is |
-| Cheflink's side | **Not built.** `cmd/fakeserver` stands in for it. [docs/protocol.md](docs/protocol.md) is what Cheflink has to implement |
 
 ## Try it without Cheflink or a printer
 
@@ -57,7 +56,7 @@ Needs Go 1.27 or later (`go version`).
 ```sh
 make build fakeserver
 
-# Terminal 1: a stand-in Cheflink and a pretend printer
+# Terminal 1: a fake server and a pretend printer
 dist/fakeserver -sink 127.0.0.1:9100
 
 # Terminal 2: pair once, then run
@@ -74,7 +73,7 @@ retried; `-every 10s` for a steady stream.
 
 ## Try it with a real printer
 
-First check this machine reaches the printer, with no server involved:
+First check this machine reaches the printer, with nothing else involved:
 
 ```sh
 dist/agent test-print -printer 192.168.1.50:9100
@@ -89,8 +88,8 @@ dist/fakeserver -printer 192.168.1.50:9100
 and pair and run the agent as above. The sample chit ends with a line of
 accented letters (`ñ Ñ á é í ó ú ü ¿ ¡ °`). If they print wrong, the printer
 wants another code page number: try `-codepage` with the values in the
-printer manual's `ESC t` table. The number that works is what Cheflink will
-have to send.
+printer manual's `ESC t` table. Note the number that works: it is the code
+page that printer needs.
 
 ## Build
 
@@ -178,7 +177,7 @@ printer. The installer does not change the PC's power settings.
 | --- | --- |
 | `pair -server URL -code CODE [-name NAME]` | Redeems a pairing code and saves the token. A running agent picks the new pairing up by itself |
 | `run` | Fetches and prints until stopped. In a terminal it logs to the terminal; as a service, to `agent.log` |
-| `test-print -printer IP:PORT` | Prints two lines and cuts, without a server |
+| `test-print -printer IP:PORT` | Prints two lines and cuts, without Cheflink |
 | `install`, `start`, `stop`, `uninstall` | The Windows service. Administrator prompt only |
 | `version` | Prints the version |
 
@@ -189,7 +188,7 @@ default is the folder the program is in.
 
 | File | What it is |
 | --- | --- |
-| `config.json` | The server address and the agent's token. Written by `pair`. Treat it as a password. The installer closes the folder to everyone but administrators; installed by hand, anyone who can read the folder can read it |
+| `config.json` | The Cheflink address and the agent's token. Written by `pair`. Treat it as a password. The installer closes the folder to everyone but administrators; installed by hand, anyone who can read the folder can read it |
 | `state.json` | The chits printed in the last day and whether Cheflink has been told. It is what stops a chit printing twice |
 | `agent.log` | The service's log. At 5 MB it becomes `agent.log.1` and a new one starts |
 
@@ -210,8 +209,6 @@ means" in [docs/protocol.md](docs/protocol.md).
 
 ## Not built yet
 
-- Cheflink's three endpoints, the print queue and the chit rendered as
-  printer commands.
 - Asking the printer for its status (paper out, cover open) before and after
   a chit. ESC/POS has commands for it; whether the Sewoo answers them has not
   been tried.
@@ -225,11 +222,11 @@ means" in [docs/protocol.md](docs/protocol.md).
 | Path | |
 | --- | --- |
 | `cmd/agent` | The program: the commands and the Windows service wrapper |
-| `internal/agent` | The loop, the server client, the ledger and the printer connection, with their tests |
+| `internal/agent` | The loop, the HTTP client, the ledger and the printer connection, with their tests |
 | `installer` | `install.cmd`, `uninstall.cmd` and the PowerShell script behind them. They go into the Windows zip |
 | `.github/workflows/release.yml` | Publishes a release when a version tag is pushed |
-| `cmd/fakeserver` | The stand-in for Cheflink, a pretend printer and the sample chit. Development only |
-| `docs/protocol.md` | The requests the agent makes, and what the server owes it |
+| `cmd/fakeserver` | A fake server to develop against, a pretend printer and the sample chit. Development only |
+| `docs/protocol.md` | The requests the agent makes and the answers it expects |
 
 The only dependency outside Go's standard library is `golang.org/x/sys`, for
 the Windows service.

@@ -1,0 +1,36 @@
+name: Release
+
+# Pushing a version tag publishes a release with the downloads attached:
+#
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# The tests run first; a tag whose tests fail publishes nothing.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        run: make vet test
+
+      # The agent reports its version without the tag's "v".
+      - name: Build the downloads
+        run: make release VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/release/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

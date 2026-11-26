@@ -31,6 +31,10 @@ type Ledger struct {
 type printedJob struct {
 	At       time.Time `json:"at"`
 	Reported bool      `json:"reported"`
+	// Host is the address the job printed on, for a job that named its
+	// printer by MAC. It is part of the "printed" report, which may have to
+	// be sent again long after the job is gone from memory.
+	Host string `json:"host,omitempty"`
 }
 
 type ledgerFile struct {
@@ -70,12 +74,23 @@ func (l *Ledger) Printed(id string) bool {
 	return ok
 }
 
-// MarkPrinted records a job the printer accepted, not yet reported.
-func (l *Ledger) MarkPrinted(id string) error {
+// MarkPrinted records a job the printer accepted, not yet reported. host is
+// the address to report with it, or "".
+func (l *Ledger) MarkPrinted(id, host string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.jobs[id] = &printedJob{At: l.now()}
+	l.jobs[id] = &printedJob{At: l.now(), Host: host}
 	return l.save()
+}
+
+// PrintedOn returns the address to report a printed job with, or "".
+func (l *Ledger) PrintedOn(id string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if job, ok := l.jobs[id]; ok {
+		return job.Host
+	}
+	return ""
 }
 
 // MarkReported records that the server knows the job was printed.

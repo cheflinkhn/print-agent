@@ -44,6 +44,7 @@ The installer has not been run on a real cashier PC yet; see the table below.
 | --- | --- |
 | Fetch, print, report, retry | Works, against `cmd/fakeserver` and a pretend printer, on Linux and on Windows 11 |
 | Automated tests | Pass (`make test`) |
+| Finding a printer whose address changed, by its MAC | Works on Linux (2026-11-26), on a real network against pretend printers in containers. **On Windows it is written and never run**: it compiles, and nothing more is known. No real printer has been tried on either |
 | A real printer | **Not tried yet.** `test-print` sends the same bytes as the PowerShell test that worked on the Sewoo SLK-TS400 |
 | Windows service (`install`, `start`, `stop`) | **Written, never run.** It compiles; it needs an administrator prompt to try |
 | The installer (`install.cmd`) | **Written, never run.** There was no Windows machine to try it on |
@@ -71,6 +72,9 @@ Things worth trying: stop the fake server and start it again; start it with
 `-printer 127.0.0.1:9999` (nothing listens there) to see a failed chit being
 retried; `-every 10s` for a steady stream.
 
+The pretend printer is on this machine and has no MAC to find, so the MAC
+lookup needs a real device: see the next section.
+
 ## Try it with a real printer
 
 First check this machine reaches the printer, with nothing else involved:
@@ -79,13 +83,28 @@ First check this machine reaches the printer, with nothing else involved:
 dist/agent test-print -printer 192.168.1.50:9100
 ```
 
-It prints two lines and cuts. Then run the loop against the real printer:
+It prints two lines and cuts. To check that this machine can also find the
+printer by itself, give the printer's MAC and no address (the MAC is on the
+printer's self-test page or on a label under it):
+
+```sh
+dist/agent test-print -mac AA:BB:CC:DD:EE:FF
+```
+
+It says where it found the printer, and prints the same two lines. `-printer
+:9101` with `-mac` names another port than 9100. With both a full `-printer`
+address and `-mac` it does what the agent does with a job: tries the address,
+and looks the MAC up only if the printer is not there.
+
+Then run the loop against the real printer:
 
 ```sh
 dist/fakeserver -printer 192.168.1.50:9100
 ```
 
-and pair and run the agent as above. The sample chit ends with a line of
+and pair and run the agent as above. Add `-mac AA:BB:CC:DD:EE:FF` and give
+`-printer` a wrong address to watch the agent find the right one and the
+fake server adopt it. The sample chit ends with a line of
 accented letters (`ñ Ñ á é í ó ú ü ¿ ¡ °`). If they print wrong, the printer
 wants another code page number: try `-codepage` with the values in the
 printer manual's `ESC t` table. Note the number that works: it is the code
@@ -171,6 +190,46 @@ switched off, and on the same network as the printer. A guest network, or a
 router with "client isolation", lets the PC reach Cheflink but not the
 printer. The installer does not change the PC's power settings.
 
+## A printer whose address changes
+
+A router hands the printer its address and can hand it another: a lease
+expires, the router restarts, the internet provider replaces it. When the
+venue's printer has its MAC entered in Cheflink, the agent deals with that
+by itself. The address on a chit is then only where the printer was last
+seen. If the printer is not there, the agent asks the network which address
+has the printer's MAC now, prints there, and tells Cheflink, which sends the
+new address from then on. Nobody at the venue does anything, and the kitchen
+loses a few seconds once. The log gets one line:
+`printer AA:BB:CC:DD:EE:FF moved from 192.168.1.50 to 192.168.1.37`.
+
+The agent also checks, when the system lets it, that the device it
+connected to is the printer. An address that used to be the printer's and
+now belongs to something else gets nothing written to it.
+
+A printer with no MAC in Cheflink is printed to by address alone, as
+before. The rules are in [docs/protocol.md](docs/protocol.md), under "A
+printer whose address changes".
+
+What it cannot do:
+
+- **Another network than the printer's.** A MAC is not visible across
+  routers. A PC on a guest network or behind a second router does not find
+  the printer; the chit fails with "is not on this computer's network".
+- **A Wi-Fi repeater that replaces MACs.** Some repeaters show their own
+  MAC for every device behind them. Not tested. A printer behind one would
+  not be found by its MAC, and would also fail the "is this the printer"
+  check at its right address, so the chits would stop. If this turns up at
+  a venue, remove the printer's MAC in Cheflink: it then prints by address
+  as before.
+- **A large network.** On a network of more than 254 addresses the agent
+  asks only the 254 around its own.
+
+On Linux the lookup needs no special rights. On Windows it uses `SendARP`
+from the system's `iphlpapi.dll`, which should work under the service's
+account with nothing installed, and has never been run: try
+`test-print -mac` on a cashier PC, and then a chit through the installed
+service with a wrong address in Cheflink, before relying on it.
+
 ## Commands
 
 | Command | What it does |
@@ -178,6 +237,7 @@ printer. The installer does not change the PC's power settings.
 | `pair -server URL -code CODE [-name NAME]` | Redeems a pairing code and saves the token. A running agent picks the new pairing up by itself |
 | `run` | Fetches and prints until stopped. In a terminal it logs to the terminal; as a service, to `agent.log` |
 | `test-print -printer IP:PORT` | Prints two lines and cuts, without Cheflink |
+| `test-print -mac MAC [-printer IP:PORT]` | The same, finding the printer by its MAC when no address is given or the address does not answer. `-printer :PORT` gives only a port |
 | `install`, `start`, `stop`, `uninstall` | The Windows service. Administrator prompt only |
 | `version` | Prints the version |
 
@@ -198,6 +258,9 @@ default is the folder the program is in.
 | --- | --- |
 | The internet or Cheflink is down | Waits and retries, 2 seconds doubling up to 30. One line in the log, and one when it is back. Chits sent meanwhile print when the connection returns, if Cheflink still offers them |
 | The printer is off, open or unreachable | Tells Cheflink the chit failed and tries it again every 5 seconds |
+| The printer's address changed, and Cheflink knows its MAC | Finds the printer on the network, prints the chit there and tells Cheflink the new address. See [A printer whose address changes](#a-printer-whose-address-changes) |
+| The printer's old address now belongs to another device | With the MAC known: writes nothing to that device, and looks for the printer. Without it: cannot tell, and sends the chit to that address |
+| The printer is off, and Cheflink knows its MAC | Fails the chit every 5 seconds as above, and looks for the printer once every 30 seconds. The failure names the MAC and the networks searched |
 | The printer is out of paper | Usually invisible to the agent: the printer accepts the chit and prints it when paper is loaded |
 | The PC restarts | The service starts again and reports anything it had printed but not reported |
 | The venue revokes the PC | Stops fetching, logs it once, and resumes by itself when paired again |
@@ -222,11 +285,11 @@ means" in [docs/protocol.md](docs/protocol.md).
 | Path | |
 | --- | --- |
 | `cmd/agent` | The program: the commands and the Windows service wrapper |
-| `internal/agent` | The loop, the HTTP client, the ledger and the printer connection, with their tests |
+| `internal/agent` | The loop, the HTTP client, the ledger, the printer connection and the MAC lookup (`finder.go`, `lookup.go`, and `lookup_linux.go` and `lookup_windows.go` for what differs between systems), with their tests |
 | `installer` | `install.cmd`, `uninstall.cmd` and the PowerShell script behind them. They go into the Windows zip |
 | `.github/workflows/release.yml` | Publishes a release when a version tag is pushed |
 | `cmd/fakeserver` | A fake server to develop against, a pretend printer and the sample chit. Development only |
 | `docs/protocol.md` | The requests the agent makes and the answers it expects |
 
 The only dependency outside Go's standard library is `golang.org/x/sys`, for
-the Windows service.
+the Windows service and the Windows side of the MAC lookup.

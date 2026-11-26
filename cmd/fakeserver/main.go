@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -42,19 +43,25 @@ type job struct {
 
 type server struct {
 	code        string
-	printerHost string
 	printerPort int
-	codePage    int
+	// printerMAC, when given, goes out with every job, so the agent can find
+	// the printer when printerHost is wrong.
+	printerMAC string
+	codePage   int
 
-	mu   sync.Mutex
-	jobs []*job
-	seq  int
+	mu sync.Mutex
+	// printerHost is where jobs are addressed to. It follows what the agent
+	// reports when the printer has a MAC, as Cheflink's does.
+	printerHost string
+	jobs        []*job
+	seq         int
 }
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8080", "address to serve the protocol on")
 	printer := flag.String("printer", "", "the printer jobs are addressed to, e.g. 192.168.1.50:9100")
 	sink := flag.String("sink", "", "also run a pretend printer on this address, e.g. 127.0.0.1:9100, and print to it when -printer is not given")
+	mac := flag.String("mac", "", "the printer's MAC, e.g. AA:BB:CC:DD:EE:FF, sent with every job as given; with it -printer may be a wrong address, to watch the agent find the right one")
 	code := flag.String("code", "123456", "the pairing code to accept")
 	every := flag.Duration("every", 0, "queue a sample chit this often, e.g. 20s (default: only when Enter is pressed)")
 	codePage := flag.Int("codepage", 16, "the number sent with ESC t to select the printer's code page for Latin-1 text")
@@ -78,7 +85,7 @@ func main() {
 		log.Fatalf("-printer must look like 192.168.1.50:9100: %v", err)
 	}
 
-	s := &server{code: *code, printerHost: host, printerPort: port, codePage: *codePage}
+	s := &server{code: *code, printerHost: host, printerPort: port, printerMAC: *mac, codePage: *codePage}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/print-agent/pair", s.pair)
 	mux.HandleFunc("POST /api/print-agent/jobs/next", s.next)
@@ -154,10 +161,14 @@ func (s *server) next(w http.ResponseWriter, r *http.Request) {
 		j.claimedAt = now
 		j.attempts++
 		log.Printf("job %s (%s) claimed, attempt %d", j.id, j.label, j.attempts)
+		printer := map[string]any{"host": s.printerHost, "port": s.printerPort}
+		if s.printerMAC != "" {
+			printer["mac"] = s.printerMAC
+		}
 		answer["job"] = map[string]any{
 			"id":      j.id,
 			"label":   j.label,
-			"printer": map[string]any{"host": s.printerHost, "port": s.printerPort},
+			"printer": printer,
 			"data":    base64.StdEncoding.EncodeToString(j.data),
 		}
 		break
@@ -170,8 +181,11 @@ func (s *server) result(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Status string `json:"status"`
-		Error  string `json:"error"`
+		Status  string `json:"status"`
+		Error   string `json:"error"`
+		Printer struct {
+			Host string `json:"host"`
+		} `json:"printer"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is not JSON"})
@@ -185,6 +199,11 @@ func (s *server) result(w http.ResponseWriter, r *http.Request) {
 		}
 		switch body.Status {
 		case "printed":
+			// Only the report that settles the job moves the printer: a
+			// late repeat must not bring an old address back.
+			if !j.done {
+				s.followPrinter(body.Printer.Host)
+			}
 			j.done = true
 			log.Printf("job %s (%s) PRINTED", j.id, j.label)
 		case "failed":
@@ -199,6 +218,29 @@ func (s *server) result(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such job"})
+}
+
+// followPrinter saves the address the agent printed on, so the next job is
+// addressed there. The caller holds s.mu.
+//
+// It is saved only for a printer with a MAC (without one the agent had
+// nothing to find it by) and only when it is a private address. Anything
+// else is ignored and logged; the report is accepted all the same, because
+// an error would make the agent send it again.
+func (s *server) followPrinter(host string) {
+	if host == "" || s.printerMAC == "" {
+		return
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil || !(ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()) {
+		log.Printf("ignoring the reported printer address %q: not a private IP address", host)
+		return
+	}
+	if ip.String() == s.printerHost {
+		return
+	}
+	log.Printf("the printer moved from %s to %s; jobs are addressed there from now on", s.printerHost, ip)
+	s.printerHost = ip.String()
 }
 
 func (s *server) enqueue() string {

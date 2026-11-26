@@ -81,7 +81,7 @@ Answer, `200`, a job:
   "job": {
     "id": "8f2c1e",
     "label": "Table 4 · Round 2",
-    "printer": {"host": "192.168.1.50", "port": 9100},
+    "printer": {"host": "192.168.1.50", "port": 9100, "mac": "AA:BB:CC:DD:EE:FF"},
     "data": "G0AbdBAbYQE..."
   },
   "poll_seconds": 2
@@ -94,6 +94,7 @@ Answer, `200`, a job:
 | `label` | What the job is, for the agent's log. Optional |
 | `printer.host` | The printer's IP address. It must be an IP literal on a private network; the agent refuses anything else and reports the job as failed |
 | `printer.port` | The printer's raw TCP port, usually 9100 |
+| `printer.mac` | Optional. The printer's MAC address. With it, `printer.host` is only a hint: see [A printer whose address changes](#a-printer-whose-address-changes). Colons, dashes or no separators, in either case; the agent compares the twelve hex digits. A value that is not twelve hex digits (or is all zeros) is ignored and logged once, and the job prints by `printer.host` as if it had no `mac` |
 | `data` | The exact bytes to write to the printer, base64 encoded, at most 1 MB decoded. The agent does not read or change them |
 | `poll_seconds` | Optional. How long the agent should wait before asking again when idle, clamped to 1 to 60. It can slow every agent down without an update |
 
@@ -116,6 +117,17 @@ Request, printed:
 {"status": "printed"}
 ```
 
+Request, printed, for a job that had a `printer.mac`:
+
+```json
+{"status": "printed", "printer": {"host": "192.168.1.37"}}
+```
+
+`printer.host` is the address the job printed on. The agent sends it on
+every `printed` report for a job with a usable `mac`, whether or not it is
+the address the job gave, and also when it sends the report again later. A
+job without a `mac` is reported without `printer`, as before.
+
 Request, not printed:
 
 ```json
@@ -127,10 +139,57 @@ Request, not printed:
 Answer: any `2xx`. `404`, `409` and `410` are also final for the agent: the
 job is already settled or gone, and it will not report it again.
 
-The agent may send the same `printed` report more than once. A job reported
-as `failed` is offered again by a later `jobs/next`. The agent waits 5 seconds
-after a failure, so a printer that is off or open is retried every 5 seconds
-until it works or the job is no longer offered.
+The agent may send the same `printed` report more than once, with the same
+`printer.host` each time. A repeat can arrive long after the first, when the
+printer may have moved again, so only the first says where the printer is.
+An error answer makes the agent send the report again, whatever the reason:
+a `printer.host` that is not wanted is ignored, not refused.
+
+A job reported as `failed` is offered again by a later `jobs/next`. The agent
+waits 5 seconds after a failure, so a printer that is off or open is retried
+every 5 seconds until it works or the job is no longer offered.
+
+## A printer whose address changes
+
+A router hands the printer its address and can hand it another: a lease
+expires, the router restarts or is replaced. The printer's MAC never
+changes, and the agent is on the printer's network, so a job that carries
+`printer.mac` is printed like this:
+
+1. The agent connects to the address where this MAC last printed, if it
+   remembers one, and then to `printer.host`.
+2. If the system can tell which MAC is behind the address it connected to,
+   and it is another device's, the agent closes the connection without
+   writing anything. If the system cannot tell, the agent writes: losing a
+   chit is worse than the small risk of a wrong device.
+3. If no address took the job, the agent looks the MAC up on the private
+   IPv4 networks the computer is directly on, and connects to the address
+   it finds. The lookup asks at most 254 addresses on each of at most 3
+   networks, takes at most 3 seconds, and runs at most once every 30
+   seconds for one MAC; in between, the last answer is used.
+4. The `printed` report says which address worked. Jobs that carry that
+   address as their `printer.host` from then on print at the first try,
+   also after the agent has restarted and forgotten it.
+
+The agent only ever connects to a private address, whether the job gave it
+or the lookup found it.
+
+One attempt, lookup included, takes at most 25 seconds, the same as for a
+job without a `mac`, so the result arrives before the job is offered again.
+
+When the job does not print, `error` says which of these happened:
+
+| `error` | Meaning |
+| --- | --- |
+| `printer AA:BB:CC:DD:EE:FF is not on this computer's network (looked on 192.168.1.0/24)` | Nothing on the computer's networks answers with this MAC: the printer is off, or the computer is on another network than the printer. The networks searched are listed, separated by commas. When an address that was tried now belongs to another device, the sentence goes on: `; 192.168.1.50 is now another device (11:22:33:44:55:66)` |
+| `printer AA:BB:CC:DD:EE:FF is at 192.168.1.37 and refuses connections on port 9100: ...` | The printer is on the network, and its port did not accept the connection. After the colon comes the system's reason. Some printers refuse one connection and accept the next, so this can pass by itself |
+| `this computer is not connected to a network` | The computer has no address on a private network |
+
+The agent retries all three every 5 seconds, like any failed job.
+
+Limits: a printer behind a Wi-Fi repeater that replaces the MAC of the
+devices behind it, or on another network segment than the computer, is not
+found by its MAC. See the README.
 
 ## What "printed" means, and who prevents duplicates
 
@@ -143,6 +202,7 @@ A lost chit is worse than a duplicate, so delivery is at least once:
 | Failure | What happens |
 | --- | --- |
 | The printer is off or unreachable | `failed` is reported; the job is offered again |
+| The printer's address changed, and the job has its MAC | The agent finds the printer, prints, and reports the address it printed on |
 | The agent or the PC dies before printing | No result arrives; the job is offered again later |
 | The job printed but the `printed` report was lost | The agent remembers it in `state.json`. It reports again before asking for more work, also after a restart. If the job is offered again meanwhile, the agent reports it and does **not** print it again |
 | The agent dies after the printer accepted the job and before it saved that fact | The job prints twice. This window is a few milliseconds |

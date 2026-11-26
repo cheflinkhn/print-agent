@@ -122,17 +122,33 @@ func (c *Client) NextJob(ctx context.Context) (*Job, time.Duration, error) {
 	return result.Job, hint, nil
 }
 
-// Report tells the server how a job ended. A job the server no longer knows
-// (already settled, expired or deleted) counts as reported: there is nothing
-// left to tell.
-func (c *Client) Report(ctx context.Context, id, status, errMsg string) error {
+// ReportPrinted tells the server a job printed. host is the address it
+// printed on, for a job that named its printer by MAC, so the server can
+// send that address from then on; it is "" for any other job.
+func (c *Client) ReportPrinted(ctx context.Context, id, host string) error {
+	body := map[string]any{"status": StatusPrinted}
+	if host != "" {
+		body["printer"] = map[string]string{"host": host}
+	}
+	return c.report(ctx, id, body)
+}
+
+// ReportFailed tells the server a job did not print, and why.
+func (c *Client) ReportFailed(ctx context.Context, id, errMsg string) error {
 	if len(errMsg) > maxErrorLength {
 		errMsg = errMsg[:maxErrorLength]
 	}
-	body := map[string]string{"status": status}
+	body := map[string]any{"status": StatusFailed}
 	if errMsg != "" {
 		body["error"] = errMsg
 	}
+	return c.report(ctx, id, body)
+}
+
+// report sends a job's result. A job the server no longer knows (already
+// settled, expired or deleted) counts as reported: there is nothing left to
+// tell.
+func (c *Client) report(ctx context.Context, id string, body map[string]any) error {
 	_, err := c.post(ctx, []string{"jobs", id, "result"}, body, nil)
 	var gone *statusError
 	if errors.As(err, &gone) {

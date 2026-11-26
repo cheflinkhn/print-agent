@@ -21,6 +21,10 @@ const (
 type Printer struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
+	// MAC, when the server knows it, is what the printer is. Host is then
+	// only where it was last seen, and the Finder looks the printer up when
+	// it is no longer there.
+	MAC string `json:"mac,omitempty"`
 }
 
 // Addr checks the printer's address and returns it as host:port.
@@ -37,10 +41,23 @@ func (p Printer) Addr() (string, error) {
 	if !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
 		return "", fmt.Errorf("printer address %s is not on a private network", ip)
 	}
-	if p.Port < 1 || p.Port > 65535 {
-		return "", fmt.Errorf("printer port %d is out of range", p.Port)
+	if err := p.checkPort(); err != nil {
+		return "", err
 	}
 	return net.JoinHostPort(ip.String(), strconv.Itoa(p.Port)), nil
+}
+
+func (p Printer) checkPort() error {
+	if p.Port < 1 || p.Port > 65535 {
+		return fmt.Errorf("printer port %d is out of range", p.Port)
+	}
+	return nil
+}
+
+// at is the same printer at another address.
+func (p Printer) at(addr netip.Addr) Printer {
+	p.Host = addr.String()
+	return p
 }
 
 func (p Printer) String() string {
@@ -62,9 +79,14 @@ func SendToPrinter(ctx context.Context, p Printer, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("cannot reach the printer at %s: %w", addr, err)
 	}
-	defer conn.Close()
+	return writeJob(conn, addr, data, time.Now().Add(writeTimeout))
+}
 
-	if err := conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+// writeJob writes a job to a printer that accepted the connection, and
+// closes the connection.
+func writeJob(conn net.Conn, addr string, data []byte, deadline time.Time) error {
+	defer conn.Close()
+	if err := conn.SetWriteDeadline(deadline); err != nil {
 		return err
 	}
 	if _, err := conn.Write(data); err != nil {

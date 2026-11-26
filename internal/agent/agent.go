@@ -30,8 +30,8 @@ type Agent struct {
 	Log        *log.Logger
 	Version    string
 
-	// send is SendToPrinter, replaced in tests.
-	send func(context.Context, Printer, []byte) error
+	// finder sends a job to its printer, wherever that is now.
+	finder *Finder
 
 	client     *Client
 	configTime time.Time
@@ -128,7 +128,7 @@ func (a *Agent) loadConfig() error {
 // flushReports delivers the "printed" reports the server has not had yet.
 func (a *Agent) flushReports(ctx context.Context) error {
 	for _, id := range a.Ledger.Unreported() {
-		if err := a.client.Report(ctx, id, StatusPrinted, ""); err != nil {
+		if err := a.client.ReportPrinted(ctx, id, a.Ledger.PrintedOn(id)); err != nil {
 			return err
 		}
 		a.markReported(id)
@@ -148,8 +148,10 @@ func (a *Agent) handle(ctx context.Context, job *Job) bool {
 	}
 
 	data, err := job.Bytes()
+	// host is where the job printed, when its printer was found by MAC.
+	var host string
 	if err == nil {
-		err = a.send(ctx, job.Printer, data)
+		host, err = a.finder.Send(ctx, job.Printer, data)
 	}
 	if err != nil {
 		if failure := job.ID + ": " + err.Error(); failure != a.printTrouble {
@@ -158,15 +160,21 @@ func (a *Agent) handle(ctx context.Context, job *Job) bool {
 		}
 		// Best effort: if this report is lost, the server's own timeout
 		// puts the job back in the queue.
-		if reportErr := a.client.Report(ctx, job.ID, StatusFailed, err.Error()); reportErr != nil {
+		if reportErr := a.client.ReportFailed(ctx, job.ID, err.Error()); reportErr != nil {
 			a.Log.Printf("job %s: could not report the failure: %v", job.ID, reportErr)
 		}
 		return false
 	}
 
 	a.printTrouble = ""
-	a.Log.Printf("printed job %s (%s) on %s, %d bytes", job.ID, job.Label, job.Printer, len(data))
-	if err := a.Ledger.MarkPrinted(job.ID); err != nil {
+	printedOn := job.Printer
+	if host != "" {
+		printedOn.Host = host
+	}
+	a.Log.Printf("printed job %s (%s) on %s, %d bytes", job.ID, job.Label, printedOn, len(data))
+	// The address goes in the ledger with the job: the report may have to
+	// be sent again after a restart.
+	if err := a.Ledger.MarkPrinted(job.ID, host); err != nil {
 		a.Log.Printf("job %s: could not save the ledger: %v", job.ID, err)
 	}
 	a.reportPrinted(ctx, job.ID)
@@ -174,7 +182,7 @@ func (a *Agent) handle(ctx context.Context, job *Job) bool {
 }
 
 func (a *Agent) reportPrinted(ctx context.Context, id string) {
-	if err := a.client.Report(ctx, id, StatusPrinted, ""); err != nil {
+	if err := a.client.ReportPrinted(ctx, id, a.Ledger.PrintedOn(id)); err != nil {
 		// Stays unreported in the ledger; flushReports retries it.
 		a.Log.Printf("job %s: could not report it as printed yet: %v", id, err)
 		return
@@ -226,6 +234,6 @@ func New(configPath string, ledger *Ledger, logger *log.Logger, version string) 
 		Ledger:     ledger,
 		Log:        logger,
 		Version:    version,
-		send:       SendToPrinter,
+		finder:     NewFinder(logger),
 	}
 }

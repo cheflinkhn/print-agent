@@ -26,7 +26,8 @@ type fakeCheflink struct {
 	mu sync.Mutex
 	// queue is what jobs/next hands out, in order; nil entries mean "no job".
 	queue []*Job
-	// results are the reports received, as "id:status" or "id:status:error".
+	// results are the reports received, as "id:status" or "id:status:error",
+	// with "@host" after it when the report said where the job printed.
 	results []string
 	// failResults makes that many result reports answer 500 first.
 	failResults int
@@ -69,11 +70,17 @@ func (f *fakeCheflink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := strings.Split(r.URL.Path, "/")[4]
-		var body struct{ Status, Error string }
+		var body struct {
+			Status, Error string
+			Printer       struct{ Host string }
+		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		entry := id + ":" + body.Status
 		if body.Error != "" {
 			entry += ":" + body.Error
+		}
+		if body.Printer.Host != "" {
+			entry += "@" + body.Printer.Host
 		}
 		f.results = append(f.results, entry)
 		_, _ = io.WriteString(w, `{"ok":true}`)
@@ -152,6 +159,9 @@ type harness struct {
 	agent   *Agent
 	server  *fakeCheflink
 	printer *fakePrinter
+	// network is the venue's network as the finder sees it, for jobs that
+	// name their printer by MAC. See finder_test.go.
+	network *fakeNetwork
 	log     *bytes.Buffer
 	dir     string
 }
@@ -173,7 +183,9 @@ func newHarness(t *testing.T) *harness {
 	}
 	logged := &bytes.Buffer{}
 	a := New(filepath.Join(dir, ConfigFileName), ledger, log.New(logged, "", 0), "test")
-	return &harness{agent: a, server: server, printer: newFakePrinter(t), log: logged, dir: dir}
+	network := newFakeNetwork(t)
+	network.attach(a.finder)
+	return &harness{agent: a, server: server, printer: newFakePrinter(t), network: network, log: logged, dir: dir}
 }
 
 func (h *harness) job(id, text string) *Job {
@@ -413,13 +425,13 @@ func TestPrinterAddr(t *testing.T) {
 		printer Printer
 		ok      bool
 	}{
-		{Printer{"192.168.1.50", 9100}, true},
-		{Printer{"10.0.0.7", 9100}, true},
-		{Printer{"127.0.0.1", 9100}, true},
-		{Printer{"8.8.8.8", 9100}, false},
-		{Printer{"printer.local", 9100}, false},
-		{Printer{"192.168.1.50", 0}, false},
-		{Printer{"192.168.1.50", 70000}, false},
+		{Printer{Host: "192.168.1.50", Port: 9100}, true},
+		{Printer{Host: "10.0.0.7", Port: 9100}, true},
+		{Printer{Host: "127.0.0.1", Port: 9100}, true},
+		{Printer{Host: "8.8.8.8", Port: 9100}, false},
+		{Printer{Host: "printer.local", Port: 9100}, false},
+		{Printer{Host: "192.168.1.50", Port: 0}, false},
+		{Printer{Host: "192.168.1.50", Port: 70000}, false},
 	}
 	for _, c := range cases {
 		_, err := c.printer.Addr()
@@ -448,14 +460,14 @@ func TestLedgerSurvivesAReopenAndForgetsOldJobs(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	ledger.now = func() time.Time { return now }
 
-	if err := ledger.MarkPrinted("old"); err != nil {
+	if err := ledger.MarkPrinted("old", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := ledger.MarkReported("old"); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(keepReported + time.Hour)
-	if err := ledger.MarkPrinted("new"); err != nil {
+	if err := ledger.MarkPrinted("new", "192.168.1.37"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -472,6 +484,9 @@ func TestLedgerSurvivesAReopenAndForgetsOldJobs(t *testing.T) {
 	if ids := reopened.Unreported(); len(ids) != 1 || ids[0] != "new" {
 		t.Errorf("unreported = %v", ids)
 	}
+	if host := reopened.PrintedOn("new"); host != "192.168.1.37" {
+		t.Errorf("the address a job printed on was lost on reopen: %q", host)
+	}
 }
 
 func TestADamagedLedgerIsSetAside(t *testing.T) {
@@ -483,7 +498,7 @@ func TestADamagedLedgerIsSetAside(t *testing.T) {
 	if warning == nil {
 		t.Error("expected a warning")
 	}
-	if err := ledger.MarkPrinted("a1"); err != nil {
+	if err := ledger.MarkPrinted("a1", ""); err != nil {
 		t.Errorf("the ledger should work after a damaged file: %v", err)
 	}
 }

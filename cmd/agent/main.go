@@ -22,6 +22,10 @@ import (
 // version is set at build time: -ldflags "-X main.version=1.2.3".
 var version = "dev"
 
+// defaultPrinterPort is the raw printing port nearly every network printer
+// listens on.
+const defaultPrinterPort = 9100
+
 const usage = `Cheflink print agent %s
 
 Fetches kitchen chits from Cheflink and prints them on a network printer.
@@ -30,6 +34,7 @@ Usage:
   agent pair -server URL -code CODE   Connect this PC to a venue
   agent run                           Fetch and print until stopped
   agent test-print -printer IP:PORT   Print a test line, without Cheflink
+  agent test-print -mac MAC           The same, finding the printer by its MAC
   agent version                       Print the version
 
 Windows service (from an administrator prompt):
@@ -195,21 +200,36 @@ func cmdRun(args []string) error {
 }
 
 // cmdTestPrint prints one line and cuts, with no server involved: it proves
-// this PC can reach the printer.
+// this PC can reach the printer. With -mac it also proves this PC can find
+// the printer, the way the agent does when a job's address has gone stale.
 func cmdTestPrint(args []string) error {
 	fs, _ := newFlags("test-print")
 	target := fs.String("printer", "", "the printer's address, e.g. 192.168.1.50:9100")
+	mac := fs.String("mac", "", "the printer's MAC, e.g. AA:BB:CC:DD:EE:FF: look the printer up by it when -printer is not given or does not answer")
 	fs.Parse(args)
-	if *target == "" {
-		return errors.New("test-print needs -printer IP:PORT")
+	if *target == "" && *mac == "" {
+		return errors.New("test-print needs -printer IP:PORT, or -mac MAC to find the printer")
 	}
-	host, portText, err := net.SplitHostPort(*target)
-	if err != nil {
-		return fmt.Errorf("-printer must look like 192.168.1.50:9100: %w", err)
+	if _, ok := agent.ParseMAC(*mac); *mac != "" && !ok {
+		return fmt.Errorf("-mac must be twelve hex digits, like AA:BB:CC:DD:EE:FF, not %q", *mac)
 	}
-	port, err := strconv.Atoi(portText)
-	if err != nil {
-		return fmt.Errorf("-printer must look like 192.168.1.50:9100: port %q is not a number", portText)
+	// With only a MAC the printer is looked up, and the usual port is meant.
+	// "-printer :9100" names another port without naming an address.
+	host, port := "", defaultPrinterPort
+	if *target != "" {
+		var portText string
+		var err error
+		host, portText, err = net.SplitHostPort(*target)
+		if err != nil {
+			return fmt.Errorf("-printer must look like 192.168.1.50:9100: %w", err)
+		}
+		port, err = strconv.Atoi(portText)
+		if err != nil {
+			return fmt.Errorf("-printer must look like 192.168.1.50:9100: port %q is not a number", portText)
+		}
+		if host == "" && *mac == "" {
+			return errors.New("-printer must look like 192.168.1.50:9100; the address may only be left out with -mac")
+		}
 	}
 
 	// ESC @ (initialize), the text, five line feeds, GS V 0 (full cut).
@@ -220,9 +240,16 @@ func cmdTestPrint(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	printer := agent.Printer{Host: host, Port: port}
-	if err := agent.SendToPrinter(ctx, printer, data); err != nil {
+	printer := agent.Printer{Host: host, Port: port, MAC: *mac}
+	// The same code a job goes through. It says on the terminal when it
+	// finds the printer somewhere other than -printer.
+	finder := agent.NewFinder(log.New(os.Stderr, "", 0))
+	foundAt, err := finder.Send(ctx, printer, data)
+	if err != nil {
 		return err
+	}
+	if foundAt != "" {
+		printer.Host = foundAt
 	}
 	fmt.Printf("Sent %d bytes to %s. The printer should print two lines and cut.\n", len(data), printer)
 	return nil
